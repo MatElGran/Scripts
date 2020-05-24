@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+
+# Stolen from https://www.depesz.com/2019/12/10/how-to-effectively-dump-postgresql-databases/
+
+# Unofficial Bash Strict Mode
+# http://redsymbol.net/articles/unofficial-bash-strict-mode/
+set -euo pipefail
+IFS=$'\n\t'
+# End of Unofficial Bash Strict Mode
+
+# config
+top_level_backup_dir="/var/tmp/backups-pg"
+backup_keep_days="3"
+concurrent_dumps="2"
+dump_workers="5"
+# config
+
+cd "${top_level_backup_dir}"
+
+backup_dir="$( date '+%Y-%m-%d' )"
+mkdir "${backup_dir}"
+cd "$backup_dir"
+
+# Make actual backup files
+
+# First globals
+pg_dumpall -r -f roles.dump
+pg_dumpall -t -f tablespaces.dump
+
+# And now per-database dumps
+psql -qAtX -c "select datname from pg_database where datallowconn order by pg_database_size(oid) desc" | \
+xargs -d '\n' -P "${concurrent_dumps}" -I % pg_dump -F d -C -j "${dump_workers}" -f pg-%.dump %
+
+# Add marker so that we'd know if the backup has finished correctly
+touch backup.done
+
+# Retention policy
+cd "$top_level_backup_dir"
+cutoff_date="$( date -d "${backup_keep_days} days ago" '+%Y-%m-%d' )"
+
+# Iterate over all backups
+for backup in [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]
+do
+  # We need to remove - characters from dates, because otherwise we'd get:
+  # >> 2019-12-08: value too great for base (error token is "08")
+  [[ "${backup//-/}" -ge "${cutoff_date//-/}" ]] && continue
+
+  # Backup is not within backup_keep_days, remove it.
+  rm -rf "${backup}"
+done
+
+# All done.
+exit 0
